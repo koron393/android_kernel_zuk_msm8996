@@ -20,7 +20,6 @@
 
 #include "sdcardfs.h"
 #include <linux/fs_struct.h>
-#include <linux/ratelimit.h>
 
 /* Do not directly use this function. Use OVERRIDE_CRED() instead. */
 const struct cred *override_fsids(struct sdcardfs_sb_info *sbi, struct sdcardfs_inode_info *info)
@@ -92,7 +91,7 @@ static int sdcardfs_create(struct inode *dir, struct dentry *dentry,
 	}
 	current->fs = copied_fs;
 	current->fs->umask = 0;
-	err = vfs_create2(lower_dentry_mnt, lower_parent_dentry->d_inode, lower_dentry, mode, want_excl);
+	err = vfs_create(lower_parent_dentry->d_inode, lower_dentry, mode, want_excl);
 	if (err)
 		goto out;
 
@@ -271,8 +270,6 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	int touch_err = 0;
 	struct fs_struct *saved_fs;
 	struct fs_struct *copied_fs;
-	struct qstr q_obb = QSTR_LITERAL("obb");
-	struct qstr q_data = QSTR_LITERAL("data");
 
 	if (!check_caller_access_to_name(dir, &dentry->d_name)) {
 		err = -EACCES;
@@ -297,6 +294,17 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 
 	/* set last 16bytes of mode field to 0775 */
 	mode = (mode & S_IFMT) | 00775;
+
+	/* temporarily change umask for lower fs write */
+	saved_fs = current->fs;
+	copied_fs = copy_fs_struct(current->fs);
+	if (!copied_fs) {
+		err = -ENOMEM;
+		goto out_unlock;
+	}
+	current->fs = copied_fs;
+	current->fs->umask = 0;
+	err = vfs_mkdir(lower_parent_dentry->d_inode, lower_dentry, mode);
 
 	/* temporarily change umask for lower fs write */
 	saved_fs = current->fs;
@@ -354,13 +362,11 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 
 	/* When creating /Android/data and /Android/obb, mark them as .nomedia */
 	if (make_nomedia_in_obb ||
-		((pi->perm == PERM_ANDROID) && (qstr_case_eq(&dentry->d_name, &q_data)))) {
-		REVERT_CRED(saved_cred);
-		OVERRIDE_CRED(SDCARDFS_SB(dir->i_sb), saved_cred, SDCARDFS_I(dentry->d_inode));
+		((pi->perm == PERM_ANDROID) && (!strcasecmp(dentry->d_name.name, "data")))) {
 		set_fs_pwd(current->fs, &lower_path);
 		touch_err = touch(".nomedia", 0664);
 		if (touch_err) {
-			pr_err("sdcardfs: failed to create .nomedia in %s: %d\n",
+			printk(KERN_ERR "sdcardfs: failed to create .nomedia in %s: %d\n",
 							lower_path.dentry->d_name.name, touch_err);
 			goto out;
 		}
@@ -369,6 +375,7 @@ out:
 	current->fs = saved_fs;
 	free_fs_struct(copied_fs);
 out_unlock:
+	unlock_dir(lower_parent_dentry);
 	sdcardfs_put_lower_path(dentry, &lower_path);
 out_revert:
 	REVERT_CRED(saved_cred);
