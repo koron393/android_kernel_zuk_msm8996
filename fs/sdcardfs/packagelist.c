@@ -33,21 +33,11 @@
 
 struct hashtable_entry {
 	struct hlist_node hlist;
-	struct hlist_node dlist; /* for deletion cleanup */
-	struct qstr key;
+	const char *key;
 	atomic_t value;
 };
 
 static DEFINE_HASHTABLE(package_to_appid, 8);
-static DEFINE_HASHTABLE(package_to_userid, 8);
-static DEFINE_HASHTABLE(ext_to_groupid, 8);
-
-
-static struct kmem_cache *hashtable_entry_cachep;
-
-static unsigned int full_name_case_hash(const unsigned char *name, unsigned int len)
-{
-	unsigned long hash = init_name_hash();
 
 	while (len--)
 		hash = partial_name_hash(tolower(*name++), hash);
@@ -95,15 +85,15 @@ appid_t get_appid(const char *key)
 	return __get_appid(&q);
 }
 
-static appid_t __get_ext_gid(const struct qstr *key)
+appid_t get_appid(const char *app_name)
 {
 	struct hashtable_entry *hash_cur;
 	unsigned int hash = key->hash;
 	appid_t ret_id;
 
 	rcu_read_lock();
-	hash_for_each_possible_rcu(ext_to_groupid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(key, &hash_cur->key)) {
+	hash_for_each_possible_rcu(package_to_appid, hash_cur, hlist, hash) {
+		if (!strcasecmp(app_name, hash_cur->key)) {
 			ret_id = atomic_read(&hash_cur->value);
 			rcu_read_unlock();
 			return ret_id;
@@ -207,35 +197,46 @@ static struct hashtable_entry *alloc_hashtable_entry(const struct qstr *key,
 	return ret;
 }
 
-static int insert_packagelist_appid_entry_locked(const struct qstr *key, appid_t value)
+static struct hashtable_entry *alloc_packagelist_entry(const char *key,
+		appid_t value)
+{
+	struct hashtable_entry *ret = kmem_cache_alloc(hashtable_entry_cachep,
+			GFP_KERNEL);
+	if (!ret)
+		return NULL;
+
+	ret->key = kstrdup(key, GFP_KERNEL);
+	if (!ret->key) {
+		kmem_cache_free(hashtable_entry_cachep, ret);
+		return NULL;
+	}
+
+	atomic_set(&ret->value, value);
+	return ret;
+}
+
+static int insert_packagelist_entry_locked(const char *key, appid_t value)
 {
 	struct hashtable_entry *hash_cur;
 	struct hashtable_entry *new_entry;
 	unsigned int hash = key->hash;
 
 	hash_for_each_possible_rcu(package_to_appid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(key, &hash_cur->key)) {
+		if (!strcasecmp(key, hash_cur->key)) {
 			atomic_set(&hash_cur->value, value);
 			return 0;
 		}
 	}
-	new_entry = alloc_hashtable_entry(key, value);
+	new_entry = alloc_packagelist_entry(key, value);
 	if (!new_entry)
 		return -ENOMEM;
 	hash_add_rcu(package_to_appid, &new_entry->hlist, hash);
 	return 0;
 }
 
-static int insert_ext_gid_entry_locked(const struct qstr *key, appid_t value)
-{
-	struct hashtable_entry *hash_cur;
-	struct hashtable_entry *new_entry;
-	unsigned int hash = key->hash;
-
-	/* An extension can only belong to one gid */
-	hash_for_each_possible_rcu(ext_to_groupid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(key, &hash_cur->key))
-			return -EINVAL;
+static void fixup_perms(struct super_block *sb) {
+	if (sb && sb->s_magic == SDCARDFS_SUPER_MAGIC) {
+		get_derive_permissions_recursive(sb->s_root);
 	}
 	new_entry = alloc_hashtable_entry(key, value);
 	if (!new_entry)
@@ -244,211 +245,54 @@ static int insert_ext_gid_entry_locked(const struct qstr *key, appid_t value)
 	return 0;
 }
 
-static int insert_userid_exclude_entry_locked(const struct qstr *key, userid_t value)
-{
-	struct hashtable_entry *hash_cur;
-	struct hashtable_entry *new_entry;
-	unsigned int hash = key->hash;
-
-	/* Only insert if not already present */
-	hash_for_each_possible_rcu(package_to_userid, hash_cur, hlist, hash) {
-		if (atomic_read(&hash_cur->value) == value &&
-				qstr_case_eq(key, &hash_cur->key))
-			return 0;
-	}
-	new_entry = alloc_hashtable_entry(key, value);
-	if (!new_entry)
-		return -ENOMEM;
-	hash_add_rcu(package_to_userid, &new_entry->hlist, hash);
-	return 0;
-}
-
-static void fixup_all_perms_name(const struct qstr *key)
+static void fixup_all_perms(void)
 {
 	struct sdcardfs_sb_info *sbinfo;
-	struct limit_search limit = {
-		.flags = BY_NAME,
-		.name = QSTR_INIT(key->name, key->len),
-	};
-	list_for_each_entry(sbinfo, &sdcardfs_super_list, list) {
-		if (sbinfo_has_sdcard_magic(sbinfo))
-			fixup_perms_recursive(sbinfo->sb->s_root, &limit);
-	}
+	list_for_each_entry(sbinfo, &sdcardfs_super_list, list)
+		if (sbinfo)
+			fixup_perms(sbinfo->sb);
 }
 
-static void fixup_all_perms_name_userid(const struct qstr *key, userid_t userid)
-{
-	struct sdcardfs_sb_info *sbinfo;
-	struct limit_search limit = {
-		.flags = BY_NAME | BY_USERID,
-		.name = QSTR_INIT(key->name, key->len),
-		.userid = userid,
-	};
-	list_for_each_entry(sbinfo, &sdcardfs_super_list, list) {
-		if (sbinfo_has_sdcard_magic(sbinfo))
-			fixup_perms_recursive(sbinfo->sb->s_root, &limit);
-	}
-}
-
-static void fixup_all_perms_userid(userid_t userid)
-{
-	struct sdcardfs_sb_info *sbinfo;
-	struct limit_search limit = {
-		.flags = BY_USERID,
-		.userid = userid,
-	};
-	list_for_each_entry(sbinfo, &sdcardfs_super_list, list) {
-		if (sbinfo_has_sdcard_magic(sbinfo))
-			fixup_perms_recursive(sbinfo->sb->s_root, &limit);
-	}
-}
-
-static int insert_packagelist_entry(const struct qstr *key, appid_t value)
+static int insert_packagelist_entry(const char *key, appid_t value)
 {
 	int err;
 
 	mutex_lock(&sdcardfs_super_list_lock);
-	err = insert_packagelist_appid_entry_locked(key, value);
+	err = insert_packagelist_entry_locked(key, value);
 	if (!err)
-		fixup_all_perms_name(key);
+		fixup_all_perms();
 	mutex_unlock(&sdcardfs_super_list_lock);
 
 	return err;
 }
 
-static int insert_ext_gid_entry(const struct qstr *key, appid_t value)
+static void free_packagelist_entry(struct hashtable_entry *entry)
 {
-	int err;
-
-	mutex_lock(&sdcardfs_super_list_lock);
-	err = insert_ext_gid_entry_locked(key, value);
-	mutex_unlock(&sdcardfs_super_list_lock);
-
-	return err;
-}
-
-static int insert_userid_exclude_entry(const struct qstr *key, userid_t value)
-{
-	int err;
-
-	mutex_lock(&sdcardfs_super_list_lock);
-	err = insert_userid_exclude_entry_locked(key, value);
-	if (!err)
-		fixup_all_perms_name_userid(key, value);
-	mutex_unlock(&sdcardfs_super_list_lock);
-
-	return err;
-}
-
-static void free_hashtable_entry(struct hashtable_entry *entry)
-{
-	kfree(entry->key.name);
+	kfree(entry->key);
+	hash_del_rcu(&entry->hlist);
 	kmem_cache_free(hashtable_entry_cachep, entry);
 }
 
-static void remove_packagelist_entry_locked(const struct qstr *key)
+static void remove_packagelist_entry_locked(const char *key)
 {
 	struct hashtable_entry *hash_cur;
-	unsigned int hash = key->hash;
-	struct hlist_node *h_t;
-	HLIST_HEAD(free_list);
+	unsigned int hash = str_hash(key);
 
-	hash_for_each_possible_rcu(package_to_userid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(key, &hash_cur->key)) {
-			hash_del_rcu(&hash_cur->hlist);
-			hlist_add_head(&hash_cur->dlist, &free_list);
-		}
-	}
 	hash_for_each_possible_rcu(package_to_appid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(key, &hash_cur->key)) {
+		if (!strcasecmp(key, hash_cur->key)) {
 			hash_del_rcu(&hash_cur->hlist);
-			hlist_add_head(&hash_cur->dlist, &free_list);
-			break;
+			synchronize_rcu();
+			free_packagelist_entry(hash_cur);
+			return;
 		}
 	}
-	synchronize_rcu();
-	hlist_for_each_entry_safe(hash_cur, h_t, &free_list, dlist)
-		free_hashtable_entry(hash_cur);
 }
 
-static void remove_packagelist_entry(const struct qstr *key)
+static void remove_packagelist_entry(const char *key)
 {
 	mutex_lock(&sdcardfs_super_list_lock);
 	remove_packagelist_entry_locked(key);
-	fixup_all_perms_name(key);
-	mutex_unlock(&sdcardfs_super_list_lock);
-}
-
-static void remove_ext_gid_entry_locked(const struct qstr *key, gid_t group)
-{
-	struct hashtable_entry *hash_cur;
-	unsigned int hash = key->hash;
-
-	hash_for_each_possible_rcu(ext_to_groupid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(key, &hash_cur->key) && atomic_read(&hash_cur->value) == group) {
-			hash_del_rcu(&hash_cur->hlist);
-			synchronize_rcu();
-			free_hashtable_entry(hash_cur);
-			break;
-		}
-	}
-}
-
-static void remove_ext_gid_entry(const struct qstr *key, gid_t group)
-{
-	mutex_lock(&sdcardfs_super_list_lock);
-	remove_ext_gid_entry_locked(key, group);
-	mutex_unlock(&sdcardfs_super_list_lock);
-}
-
-static void remove_userid_all_entry_locked(userid_t userid)
-{
-	struct hashtable_entry *hash_cur;
-	struct hlist_node *h_t;
-	HLIST_HEAD(free_list);
-	int i;
-
-	hash_for_each_rcu(package_to_userid, i, hash_cur, hlist) {
-		if (atomic_read(&hash_cur->value) == userid) {
-			hash_del_rcu(&hash_cur->hlist);
-			hlist_add_head(&hash_cur->dlist, &free_list);
-		}
-	}
-	synchronize_rcu();
-	hlist_for_each_entry_safe(hash_cur, h_t, &free_list, dlist) {
-		free_hashtable_entry(hash_cur);
-	}
-}
-
-static void remove_userid_all_entry(userid_t userid)
-{
-	mutex_lock(&sdcardfs_super_list_lock);
-	remove_userid_all_entry_locked(userid);
-	fixup_all_perms_userid(userid);
-	mutex_unlock(&sdcardfs_super_list_lock);
-}
-
-static void remove_userid_exclude_entry_locked(const struct qstr *key, userid_t userid)
-{
-	struct hashtable_entry *hash_cur;
-	unsigned int hash = key->hash;
-
-	hash_for_each_possible_rcu(package_to_userid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(key, &hash_cur->key) &&
-				atomic_read(&hash_cur->value) == userid) {
-			hash_del_rcu(&hash_cur->hlist);
-			synchronize_rcu();
-			free_hashtable_entry(hash_cur);
-			break;
-		}
-	}
-}
-
-static void remove_userid_exclude_entry(const struct qstr *key, userid_t userid)
-{
-	mutex_lock(&sdcardfs_super_list_lock);
-	remove_userid_exclude_entry_locked(key, userid);
-	fixup_all_perms_name_userid(key, userid);
+	fixup_all_perms();
 	mutex_unlock(&sdcardfs_super_list_lock);
 }
 
@@ -458,21 +302,17 @@ static void packagelist_destroy(void)
 	struct hlist_node *h_t;
 	HLIST_HEAD(free_list);
 	int i;
-
 	mutex_lock(&sdcardfs_super_list_lock);
 	hash_for_each_rcu(package_to_appid, i, hash_cur, hlist) {
 		hash_del_rcu(&hash_cur->hlist);
-		hlist_add_head(&hash_cur->dlist, &free_list);
-	}
-	hash_for_each_rcu(package_to_userid, i, hash_cur, hlist) {
-		hash_del_rcu(&hash_cur->hlist);
-		hlist_add_head(&hash_cur->dlist, &free_list);
+		hlist_add_head(&hash_cur->hlist, &free_list);
+
 	}
 	synchronize_rcu();
-	hlist_for_each_entry_safe(hash_cur, h_t, &free_list, dlist)
-		free_hashtable_entry(hash_cur);
+	hlist_for_each_entry_safe(hash_cur, h_t, &free_list, hlist)
+		free_packagelist_entry(hash_cur);
 	mutex_unlock(&sdcardfs_super_list_lock);
-	pr_info("sdcardfs: destroyed packagelist pkgld\n");
+	printk(KERN_INFO "sdcardfs: destroyed packagelist pkgld\n");
 }
 
 struct package_details {
@@ -517,26 +357,13 @@ static ssize_t package_details_appid_store(struct package_details *package_detai
 static ssize_t package_details_excluded_userids_show(struct package_details *package_details,
 				      char *page)
 {
-	struct hashtable_entry *hash_cur;
-	unsigned int hash = package_details->name.hash;
-	int count = 0;
-
-	rcu_read_lock();
-	hash_for_each_possible_rcu(package_to_userid, hash_cur, hlist, hash) {
-		if (qstr_case_eq(&package_details->name, &hash_cur->key))
-			count += scnprintf(page + count, PAGE_SIZE - count,
-					"%d ", atomic_read(&hash_cur->value));
-	}
-	rcu_read_unlock();
-	if (count)
-		count--;
-	count += scnprintf(page + count, PAGE_SIZE - count, "\n");
-	return count;
+	return scnprintf(page, PAGE_SIZE, "%u\n", get_appid(item->ci_name));
 }
 
 static ssize_t package_details_excluded_userids_store(struct package_details *package_details,
 				       const char *page, size_t count)
 {
+	struct package_appid *package_appid = to_package_appid(item);
 	unsigned int tmp;
 	int ret;
 
@@ -544,8 +371,8 @@ static ssize_t package_details_excluded_userids_store(struct package_details *pa
 	if (ret)
 		return ret;
 
-	ret = insert_userid_exclude_entry(&package_details->name, tmp);
-
+	ret = insert_packagelist_entry(item->ci_name, tmp);
+	package_appid->add_pid = tmp;
 	if (ret)
 		return ret;
 
@@ -555,14 +382,10 @@ static ssize_t package_details_excluded_userids_store(struct package_details *pa
 static ssize_t package_details_clear_userid_store(struct package_details *package_details,
 				       const char *page, size_t count)
 {
-	unsigned int tmp;
-	int ret;
-
-	ret = kstrtouint(page, 10, &tmp);
-	if (ret)
-		return ret;
-	remove_userid_exclude_entry(&package_details->name, tmp);
-	return count;
+	printk(KERN_INFO "sdcardfs: removing %s\n", item->ci_dentry->d_name.name);
+	/* item->ci_name is freed already, so we rely on the dentry */
+	remove_packagelist_entry(item->ci_dentry->d_name.name);
+	kfree(to_package_appid(item));
 }
 
 static void package_details_release(struct config_item *item)
@@ -763,22 +586,22 @@ static struct config_item *packages_make_item(struct config_group *group, const 
 static ssize_t packages_list_show(struct packages *packages,
 					 char *page)
 {
-	struct hashtable_entry *hash_cur_app;
-	struct hashtable_entry *hash_cur_user;
+	struct hashtable_entry *hash_cur;
 	int i;
 	int count = 0, written = 0;
-	char errormsg[] = "<truncated>\n";
+	const char errormsg[] = "<truncated>\n";
 
-	mutex_lock(&pkgl_data_all->hashtable_lock);
-	hash_for_each_safe(pkgl_data_all->package_to_appid, i, h_t, hash_cur, hlist) {
-		written = scnprintf(page + count, PAGE_SIZE - sizeof(errormsg) - count, "%s %d\n", (char *)hash_cur->key, hash_cur->value);
+	rcu_read_lock();
+	hash_for_each_rcu(package_to_appid, i, hash_cur, hlist) {
+		written = scnprintf(page + count, PAGE_SIZE - sizeof(errormsg) - count, "%s %d\n",
+					(const char *)hash_cur->key, atomic_read(&hash_cur->value));
 		if (count + written == PAGE_SIZE - sizeof(errormsg)) {
 			count += scnprintf(page + count, PAGE_SIZE - count, errormsg);
 			break;
 		}
 		count += written;
 	}
-	mutex_unlock(&pkgl_data_all->hashtable_lock);
+	rcu_read_unlock();
 
 	return count;
 }
@@ -884,5 +707,6 @@ void packagelist_exit(void)
 {
 	configfs_sdcardfs_exit();
 	packagelist_destroy();
-	kmem_cache_destroy(hashtable_entry_cachep);
+	if (hashtable_entry_cachep)
+		kmem_cache_destroy(hashtable_entry_cachep);
 }
