@@ -767,28 +767,18 @@ static ssize_t packages_list_show(struct packages *packages,
 	struct hashtable_entry *hash_cur_user;
 	int i;
 	int count = 0, written = 0;
-	const char errormsg[] = "<truncated>\n";
-	unsigned int hash;
+	char errormsg[] = "<truncated>\n";
 
-	rcu_read_lock();
-	hash_for_each_rcu(package_to_appid, i, hash_cur_app, hlist) {
-		written = scnprintf(page + count, PAGE_SIZE - sizeof(errormsg) - count, "%s %d\n",
-					hash_cur_app->key.name, atomic_read(&hash_cur_app->value));
-		hash = hash_cur_app->key.hash;
-		hash_for_each_possible_rcu(package_to_userid, hash_cur_user, hlist, hash) {
-			if (qstr_case_eq(&hash_cur_app->key, &hash_cur_user->key)) {
-				written += scnprintf(page + count + written - 1,
-					PAGE_SIZE - sizeof(errormsg) - count - written + 1,
-					" %d\n", atomic_read(&hash_cur_user->value)) - 1;
-			}
-		}
-		if (count + written == PAGE_SIZE - sizeof(errormsg) - 1) {
+	mutex_lock(&pkgl_data_all->hashtable_lock);
+	hash_for_each_safe(pkgl_data_all->package_to_appid, i, h_t, hash_cur, hlist) {
+		written = scnprintf(page + count, PAGE_SIZE - sizeof(errormsg) - count, "%s %d\n", (char *)hash_cur->key, hash_cur->value);
+		if (count + written == PAGE_SIZE - sizeof(errormsg)) {
 			count += scnprintf(page + count, PAGE_SIZE - count, errormsg);
 			break;
 		}
 		count += written;
 	}
-	rcu_read_unlock();
+	mutex_unlock(&pkgl_data_all->hashtable_lock);
 
 	return count;
 }
