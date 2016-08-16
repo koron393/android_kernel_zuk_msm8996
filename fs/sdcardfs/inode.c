@@ -522,10 +522,11 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		sdcardfs_copy_and_fix_attrs(old_dir, lower_old_dir_dentry->d_inode);
 		fsstack_copy_inode_size(old_dir, lower_old_dir_dentry->d_inode);
 	}
-	get_derived_permission_new(new_dentry->d_parent, old_dentry, &new_dentry->d_name);
-	fixup_tmp_permissions(old_dentry->d_inode);
-	fixup_lower_ownership(old_dentry, new_dentry->d_name.name);
-	d_invalidate(old_dentry); /* Can't fixup ownership recursively :( */
+	/* At this point, not all dentry information has been moved, so
+	 * we pass along new_dentry for the name.*/
+	get_derived_permission_new(new_dentry->d_parent, old_dentry, new_dentry);
+	fix_derived_permission(old_dentry->d_inode);
+	get_derive_permissions_recursive(old_dentry);
 out:
 	unlock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
 	dput(lower_old_dir_dentry);

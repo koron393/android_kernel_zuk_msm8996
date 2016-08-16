@@ -148,79 +148,17 @@ void get_derived_permission(struct dentry *parent, struct dentry *dentry)
 
 void get_derive_permissions_recursive(struct dentry *parent) {
 	struct dentry *dentry;
+	spin_lock(&parent->d_lock);
 	list_for_each_entry(dentry, &parent->d_subdirs, d_child) {
 		if (dentry->d_inode) {
-			mutex_lock(&dentry->d_inode->i_mutex);
 			get_derived_permission(parent, dentry);
 			fix_derived_permission(dentry->d_inode);
 			get_derive_permissions_recursive(dentry);
-			mutex_unlock(&dentry->d_inode->i_mutex);
 		}
 		if (error)
 			pr_err("sdcardfs: Failed to touch up lower fs gid/uid.\n");
 	}
-	sdcardfs_put_lower_path(dentry, &path);
-}
-
-static int descendant_may_need_fixup(struct sdcardfs_inode_info *info, struct limit_search *limit)
-{
-	if (info->perm == PERM_ROOT)
-		return (limit->flags & BY_USERID)?info->userid == limit->userid:1;
-	if (info->perm == PERM_PRE_ROOT || info->perm == PERM_ANDROID)
-		return 1;
-	return 0;
-}
-
-static int needs_fixup(perm_t perm)
-{
-	if (perm == PERM_ANDROID_DATA || perm == PERM_ANDROID_OBB
-			|| perm == PERM_ANDROID_MEDIA)
-		return 1;
-	return 0;
-}
-
-static void __fixup_perms_recursive(struct dentry *dentry, struct limit_search *limit, int depth)
-{
-	struct dentry *child;
-	struct sdcardfs_inode_info *info;
-
-	/*
-	 * All paths will terminate their recursion on hitting PERM_ANDROID_OBB,
-	 * PERM_ANDROID_MEDIA, or PERM_ANDROID_DATA. This happens at a depth of
-	 * at most 3.
-	 */
-	WARN(depth > 3, "%s: Max expected depth exceeded!\n", __func__);
-	spin_lock_nested(&dentry->d_lock, depth);
-	if (!dentry->d_inode) {
-		spin_unlock(&dentry->d_lock);
-		return;
-	}
-	info = SDCARDFS_I(dentry->d_inode);
-
-	if (needs_fixup(info->perm)) {
-		list_for_each_entry(child, &dentry->d_subdirs, d_child) {
-			spin_lock_nested(&child->d_lock, depth + 1);
-			if (!(limit->flags & BY_NAME) || qstr_case_eq(&child->d_name, &limit->name)) {
-				if (child->d_inode) {
-					get_derived_permission(dentry, child);
-					fixup_tmp_permissions(child->d_inode);
-					spin_unlock(&child->d_lock);
-					break;
-				}
-			}
-			spin_unlock(&child->d_lock);
-		}
-	} else if (descendant_may_need_fixup(info, limit)) {
-		list_for_each_entry(child, &dentry->d_subdirs, d_child) {
-			__fixup_perms_recursive(child, limit, depth + 1);
-		}
-	}
-	spin_unlock(&dentry->d_lock);
-}
-
-void fixup_perms_recursive(struct dentry *dentry, struct limit_search *limit)
-{
-	__fixup_perms_recursive(dentry, limit, 0);
+	spin_unlock(&parent->d_lock);
 }
 
 /* main function for updating derived permission */
@@ -236,14 +174,16 @@ inline void update_derived_permission_lock(struct dentry *dentry)
 	 * 1. need to check whether the dentry is updated or not
 	 * 2. remove the root dentry update
 	 */
-	if (!IS_ROOT(dentry)) {
+	if(IS_ROOT(dentry)) {
+		//setup_default_pre_root_state(dentry->d_inode);
+	} else {
 		parent = dget_parent(dentry);
 		if (parent) {
 			get_derived_permission(parent, dentry);
 			dput(parent);
 		}
 	}
-	fixup_tmp_permissions(dentry->d_inode);
+	fix_derived_permission(dentry->d_inode);
 }
 
 int need_graft_path(struct dentry *dentry)
