@@ -317,7 +317,7 @@ static void packagelist_destroy(void)
 
 struct package_details {
 	struct config_item item;
-	struct qstr name;
+	const char* name;
 };
 
 static inline struct package_details *to_package_details(struct config_item *item)
@@ -328,12 +328,11 @@ static inline struct package_details *to_package_details(struct config_item *ite
 CONFIGFS_ATTR_STRUCT(package_details);
 #define PACKAGE_DETAILS_ATTR(_name, _mode, _show, _store)	\
 struct package_details_attribute package_details_attr_##_name = __CONFIGFS_ATTR(_name, _mode, _show, _store)
-#define PACKAGE_DETAILS_ATTRIBUTE(name) (&package_details_attr_##name.attr)
 
 static ssize_t package_details_appid_show(struct package_details *package_details,
 				      char *page)
 {
-	return scnprintf(page, PAGE_SIZE, "%u\n", __get_appid(&package_details->name));
+	return scnprintf(page, PAGE_SIZE, "%u\n", get_appid(package_details->name));
 }
 
 static ssize_t package_details_appid_store(struct package_details *package_details,
@@ -346,72 +345,31 @@ static ssize_t package_details_appid_store(struct package_details *package_detai
 	if (ret)
 		return ret;
 
-	ret = insert_packagelist_entry(&package_details->name, tmp);
+	ret = insert_packagelist_entry(package_details->name, tmp);
 
 	if (ret)
 		return ret;
 
 	return count;
-}
-
-static ssize_t package_details_excluded_userids_show(struct package_details *package_details,
-				      char *page)
-{
-	return scnprintf(page, PAGE_SIZE, "%u\n", get_appid(item->ci_name));
-}
-
-static ssize_t package_details_excluded_userids_store(struct package_details *package_details,
-				       const char *page, size_t count)
-{
-	struct package_appid *package_appid = to_package_appid(item);
-	unsigned int tmp;
-	int ret;
-
-	ret = kstrtouint(page, 10, &tmp);
-	if (ret)
-		return ret;
-
-	ret = insert_packagelist_entry(item->ci_name, tmp);
-	package_appid->add_pid = tmp;
-	if (ret)
-		return ret;
-
-	return count;
-}
-
-static ssize_t package_details_clear_userid_store(struct package_details *package_details,
-				       const char *page, size_t count)
-{
-	printk(KERN_INFO "sdcardfs: removing %s\n", item->ci_dentry->d_name.name);
-	/* item->ci_name is freed already, so we rely on the dentry */
-	remove_packagelist_entry(item->ci_dentry->d_name.name);
-	kfree(to_package_appid(item));
 }
 
 static void package_details_release(struct config_item *item)
 {
 	struct package_details *package_details = to_package_details(item);
-
-	pr_info("sdcardfs: removing %s\n", package_details->name.name);
-	remove_packagelist_entry(&package_details->name);
-	kfree(package_details->name.name);
+	printk(KERN_INFO "sdcardfs: removing %s\n", package_details->name);
+	remove_packagelist_entry(package_details->name);
+	kfree(package_details->name);
 	kfree(package_details);
 }
 
 PACKAGE_DETAILS_ATTR(appid, S_IRUGO | S_IWUGO, package_details_appid_show, package_details_appid_store);
-PACKAGE_DETAILS_ATTR(excluded_userids, S_IRUGO | S_IWUGO,
-		package_details_excluded_userids_show, package_details_excluded_userids_store);
-PACKAGE_DETAILS_ATTR(clear_userid, S_IWUGO, NULL, package_details_clear_userid_store);
 
 static struct configfs_attribute *package_details_attrs[] = {
-	PACKAGE_DETAILS_ATTRIBUTE(appid),
-	PACKAGE_DETAILS_ATTRIBUTE(excluded_userids),
-	PACKAGE_DETAILS_ATTRIBUTE(clear_userid),
+	&package_details_attr_appid.attr,
 	NULL,
 };
 
 CONFIGFS_ATTR_OPS(package_details);
-
 static struct configfs_item_operations package_details_item_ops = {
 	.release = package_details_release,
 	.show_attribute = package_details_attr_show,
@@ -422,130 +380,6 @@ static struct config_item_type package_appid_type = {
 	.ct_item_ops	= &package_details_item_ops,
 	.ct_attrs	= package_details_attrs,
 	.ct_owner	= THIS_MODULE,
-};
-
-struct extensions_value {
-	struct config_group group;
-	unsigned int num;
-};
-
-struct extension_details {
-	struct config_item item;
-	struct qstr name;
-	unsigned int num;
-};
-
-static inline struct extensions_value *to_extensions_value(struct config_item *item)
-{
-	return item ? container_of(to_config_group(item), struct extensions_value, group) : NULL;
-}
-
-static inline struct extension_details *to_extension_details(struct config_item *item)
-{
-	return item ? container_of(item, struct extension_details, item) : NULL;
-}
-
-static void extension_details_release(struct config_item *item)
-{
-	struct extension_details *extension_details = to_extension_details(item);
-
-	pr_info("sdcardfs: No longer mapping %s files to gid %d\n",
-			extension_details->name.name, extension_details->num);
-	remove_ext_gid_entry(&extension_details->name, extension_details->num);
-	kfree(extension_details->name.name);
-	kfree(extension_details);
-}
-
-static struct configfs_item_operations extension_details_item_ops = {
-	.release = extension_details_release,
-};
-
-static struct config_item_type extension_details_type = {
-	.ct_item_ops = &extension_details_item_ops,
-	.ct_owner = THIS_MODULE,
-};
-
-static struct config_item *extension_details_make_item(struct config_group *group, const char *name)
-{
-	struct extensions_value *extensions_value = to_extensions_value(&group->cg_item);
-	struct extension_details *extension_details = kzalloc(sizeof(struct extension_details), GFP_KERNEL);
-	const char *tmp;
-	int ret;
-
-	if (!extension_details)
-		return ERR_PTR(-ENOMEM);
-
-	tmp = kstrdup(name, GFP_KERNEL);
-	if (!tmp) {
-		kfree(extension_details);
-		return ERR_PTR(-ENOMEM);
-	}
-	qstr_init(&extension_details->name, tmp);
-	ret = insert_ext_gid_entry(&extension_details->name, extensions_value->num);
-
-	if (ret) {
-		kfree(extension_details->name.name);
-		kfree(extension_details);
-		return ERR_PTR(ret);
-	}
-	config_item_init_type_name(&extension_details->item, name, &extension_details_type);
-
-	return &extension_details->item;
-}
-
-static struct configfs_group_operations extensions_value_group_ops = {
-	.make_item = extension_details_make_item,
-};
-
-static struct config_item_type extensions_name_type = {
-	.ct_group_ops	= &extensions_value_group_ops,
-	.ct_owner	= THIS_MODULE,
-};
-
-static struct config_group *extensions_make_group(struct config_group *group, const char *name)
-{
-	struct extensions_value *extensions_value;
-	unsigned int tmp;
-	int ret;
-
-	extensions_value = kzalloc(sizeof(struct extensions_value), GFP_KERNEL);
-	if (!extensions_value)
-		return ERR_PTR(-ENOMEM);
-	ret = kstrtouint(name, 10, &tmp);
-	if (ret) {
-		kfree(extensions_value);
-		return ERR_PTR(ret);
-	}
-
-	extensions_value->num = tmp;
-	config_group_init_type_name(&extensions_value->group, name,
-						&extensions_name_type);
-	return &extensions_value->group;
-}
-
-static void extensions_drop_group(struct config_group *group, struct config_item *item)
-{
-	struct extensions_value *value = to_extensions_value(item);
-
-	pr_info("sdcardfs: No longer mapping any files to gid %d\n", value->num);
-	kfree(value);
-}
-
-static struct configfs_group_operations extensions_group_ops = {
-	.make_group	= extensions_make_group,
-	.drop_item	= extensions_drop_group,
-};
-
-static struct config_item_type extensions_type = {
-	.ct_group_ops	= &extensions_group_ops,
-	.ct_owner	= THIS_MODULE,
-};
-
-struct config_group extension_group = {
-	.cg_item = {
-		.ci_namebuf = "extensions",
-		.ci_type = &extensions_type,
-	},
 };
 
 struct packages {
@@ -561,24 +395,21 @@ CONFIGFS_ATTR_STRUCT(packages);
 #define PACKAGES_ATTR(_name, _mode, _show, _store)	\
 struct packages_attribute packages_attr_##_name = __CONFIGFS_ATTR(_name, _mode, _show, _store)
 #define PACKAGES_ATTR_RO(_name, _show)	\
-struct packages_attribute packages_attr_##_name = __CONFIGFS_ATTR_RO(_name, _show)
+struct packages_attribute packages_attr_##_name = __CONFIGFS_ATTR_RO(_name, _show);
 
 static struct config_item *packages_make_item(struct config_group *group, const char *name)
 {
 	struct package_details *package_details;
-	const char *tmp;
 
 	package_details = kzalloc(sizeof(struct package_details), GFP_KERNEL);
 	if (!package_details)
 		return ERR_PTR(-ENOMEM);
-	tmp = kstrdup(name, GFP_KERNEL);
-	if (!tmp) {
-		kfree(package_details);
+	package_details->name = kstrdup(name, GFP_KERNEL);
+	if (!package_details->name)
 		return ERR_PTR(-ENOMEM);
-	}
-	qstr_init(&package_details->name, tmp);
+
 	config_item_init_type_name(&package_details->item, name,
-						&package_appid_type);
+				   &package_appid_type);
 
 	return &package_details->item;
 }
@@ -606,25 +437,10 @@ static ssize_t packages_list_show(struct packages *packages,
 	return count;
 }
 
-static ssize_t packages_remove_userid_store(struct packages *packages,
-				       const char *page, size_t count)
-{
-	unsigned int tmp;
-	int ret;
-
-	ret = kstrtouint(page, 10, &tmp);
-	if (ret)
-		return ret;
-	remove_userid_all_entry(tmp);
-	return count;
-}
-
 struct packages_attribute packages_attr_packages_gid_list = __CONFIGFS_ATTR_RO(packages_gid.list, packages_list_show);
-PACKAGES_ATTR(remove_userid, S_IWUGO, NULL, packages_remove_userid_store);
 
 static struct configfs_attribute *packages_attrs[] = {
 	&packages_attr_packages_gid_list.attr,
-	&packages_attr_remove_userid.attr,
 	NULL,
 };
 
@@ -649,11 +465,6 @@ static struct config_item_type packages_type = {
 	.ct_owner	= THIS_MODULE,
 };
 
-struct config_group *sd_default_groups[] = {
-	&extension_group,
-	NULL,
-};
-
 static struct packages sdcardfs_packages = {
 	.subsystem = {
 		.su_group = {
@@ -661,14 +472,13 @@ static struct packages sdcardfs_packages = {
 				.ci_namebuf = "sdcardfs",
 				.ci_type = &packages_type,
 			},
-			.default_groups = sd_default_groups,
 		},
 	},
 };
 
 static int configfs_sdcardfs_init(void)
 {
-	int ret, i;
+	int ret;
 	struct configfs_subsystem *subsys = &sdcardfs_packages.subsystem;
 
 	for (i = 0; sd_default_groups[i]; i++)
