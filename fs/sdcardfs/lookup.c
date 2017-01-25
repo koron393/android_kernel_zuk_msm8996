@@ -412,6 +412,7 @@ struct dentry *sdcardfs_lookup(struct inode *dir, struct dentry *dentry,
 		/* get derived permission */
 		get_derived_permission(parent, dentry);
 		fixup_tmp_permissions(dentry->d_inode);
+		fixup_lower_ownership(dentry, dentry->d_name.name);
 	}
 	/* update parent directory's atime */
 	fsstack_copy_attr_atime(parent->d_inode,

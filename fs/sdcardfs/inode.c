@@ -22,10 +22,10 @@
 #include <linux/fs_struct.h>
 
 /* Do not directly use this function. Use OVERRIDE_CRED() instead. */
-const struct cred *override_fsids(struct sdcardfs_sb_info *sbi, struct sdcardfs_inode_info *info)
+const struct cred * override_fsids(struct sdcardfs_sb_info* sbi, struct sdcardfs_inode_info *info)
 {
-	struct cred *cred;
-	const struct cred *old_cred;
+	struct cred * cred;
+	const struct cred * old_cred;
 	uid_t uid;
 
 	cred = prepare_creds();
@@ -343,9 +343,8 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	fsstack_copy_inode_size(dir, lower_parent_dentry->d_inode);
 	/* update number of links on parent directory */
 	set_nlink(dir, sdcardfs_lower_inode(dir)->i_nlink);
-
+	fixup_lower_ownership(dentry, dentry->d_name.name);
 	unlock_dir(lower_parent_dentry);
-
 	if ((!sbi->options.multiuser) && (!strcasecmp(dentry->d_name.name, "obb"))
 		&& (pi->perm == PERM_ANDROID) && (pi->userid == 0))
 		make_nomedia_in_obb = 1;
@@ -353,6 +352,8 @@ static int sdcardfs_mkdir(struct inode *dir, struct dentry *dentry, umode_t mode
 	/* When creating /Android/data and /Android/obb, mark them as .nomedia */
 	if (make_nomedia_in_obb ||
 		((pi->perm == PERM_ANDROID) && (!strcasecmp(dentry->d_name.name, "data")))) {
+		REVERT_CRED(saved_cred);
+		OVERRIDE_CRED(SDCARDFS_SB(dir->i_sb), saved_cred, SDCARDFS_I(dentry->d_inode));
 		set_fs_pwd(current->fs, &lower_path);
 		touch_err = touch(".nomedia", 0664);
 		if (touch_err) {
@@ -511,11 +512,10 @@ static int sdcardfs_rename(struct inode *old_dir, struct dentry *old_dentry,
 		sdcardfs_copy_and_fix_attrs(old_dir, lower_old_dir_dentry->d_inode);
 		fsstack_copy_inode_size(old_dir, lower_old_dir_dentry->d_inode);
 	}
-	/* At this point, not all dentry information has been moved, so
-	 * we pass along new_dentry for the name.*/
-	get_derived_permission_new(new_dentry->d_parent, old_dentry, new_dentry);
+	get_derived_permission_new(new_dentry->d_parent, old_dentry, new_dentry->d_name.name);
 	fixup_tmp_permissions(old_dentry->d_inode);
-	fixup_top_recursive(old_dentry);
+	fixup_lower_ownership(old_dentry, new_dentry->d_name.name);
+	drop_recursive(old_dentry); /* Can't fixup ownership recursively :( */
 out:
 	unlock_rename(lower_old_dir_dentry, lower_new_dir_dentry);
 	dput(lower_old_dir_dentry);
@@ -744,7 +744,7 @@ static int sdcardfs_setattr(struct vfsmount *mnt, struct dentry *dentry, struct 
 		goto out_err;
 
 	/* save current_cred and override it */
-	OVERRIDE_CRED(SDCARDFS_SB(dentry->d_sb), saved_cred);
+	OVERRIDE_CRED(SDCARDFS_SB(dentry->d_sb), saved_cred, SDCARDFS_I(inode));
 
 	sdcardfs_get_lower_path(dentry, &lower_path);
 	lower_dentry = lower_path.dentry;
