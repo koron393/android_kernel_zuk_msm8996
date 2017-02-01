@@ -243,7 +243,6 @@ static struct dentry *__sdcardfs_lookup(struct dentry *dentry,
 	struct dentry *lower_dentry;
 	const struct qstr *name;
 	struct path lower_path;
-	struct qstr dname;
 	struct sdcardfs_sb_info *sbi;
 
 	sbi = SDCARDFS_SB(dentry->d_sb);
@@ -270,7 +269,7 @@ static struct dentry *__sdcardfs_lookup(struct dentry *dentry,
 		spin_lock(&lower_dir_dentry->d_lock);
 		list_for_each_entry(child, &lower_dir_dentry->d_subdirs, d_child) {
 			if (child && child->d_inode) {
-				if (strcasecmp(child->d_name.name, name)==0) {
+				if (qstr_case_eq(&child->d_name, name)) {
 					match = dget(child);
 					break;
 				}
@@ -332,14 +331,11 @@ static struct dentry *__sdcardfs_lookup(struct dentry *dentry,
 		goto out;
 
 	/* instatiate a new negative dentry */
-	dname.name = name->name;
-	dname.len = name->len;
-	dname.hash = full_name_hash(dname.name, dname.len);
-	lower_dentry = d_lookup(lower_dir_dentry, &dname);
+	lower_dentry = d_lookup(lower_dir_dentry, name);
 	if (lower_dentry)
 		goto setup_lower;
 
-	lower_dentry = d_alloc(lower_dir_dentry, &dname);
+	lower_dentry = d_alloc(lower_dir_dentry, name);
 	if (!lower_dentry) {
 		err = -ENOMEM;
 		goto out;
@@ -384,7 +380,7 @@ struct dentry *sdcardfs_lookup(struct inode *dir, struct dentry *dentry,
 
 	parent = dget_parent(dentry);
 
-	if (!check_caller_access_to_name(parent->d_inode, &dentry->d_name)) {
+	if(!check_caller_access_to_name(parent->d_inode, &dentry->d_name)) {
 		ret = ERR_PTR(-EACCES);
 		goto out_err;
 	}
