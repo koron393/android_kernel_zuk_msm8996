@@ -475,6 +475,8 @@ extern void *power_supply_get_drvdata(struct power_supply *psy);
 /* For APM emulation, think legacy userspace. */
 extern struct class *power_supply_class;
 
+extern int get_usb_id_state(void);
+
 static inline bool power_supply_is_amp_property(enum power_supply_property psp)
 {
 	switch (psp) {
